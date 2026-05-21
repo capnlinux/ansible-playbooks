@@ -1,14 +1,15 @@
 ---
-- name: Complete Linux Server Setup
+- name: Complete Linux Server Setup (WordPress Dedicated)
   hosts: localhost
   become: yes
 
   vars:
     mysql_root_password: "SecurePass123"
-    domain_name: "myserver.local"
+    wp_db_name: "wordpress"
+    wp_db_user: "wp_user"
+    wp_db_password: "WP_Secure_Password_2026!"
 
   tasks:
-
     - name: Update system
       apt:
         update_cache: yes
@@ -22,11 +23,19 @@
           - php
           - php-mysql
           - php-fpm
+          - php-curl
+          - php-gd
+          - php-intl
+          - php-mbstring
+          - php-soap
+          - php-xml
+          - php-xmlrpc
+          - php-zip
           - ufw
           - fail2ban
           - git
           - curl
-          - docker.io
+          - unzip
         state: present
 
     - name: Start and enable services
@@ -37,48 +46,78 @@
       loop:
         - nginx
         - mysql
-        - docker
         - fail2ban
 
-    - name: Configure UFW default deny
-      ufw:
-        default: deny
-
-    - name: Allow SSH
+    - name: Configure Firewall Rules
       ufw:
         rule: allow
-        port: '22'
+        port: "{{ item }}"
         proto: tcp
-
-    - name: Allow HTTP
-      ufw:
-        rule: allow
-        port: '80'
-        proto: tcp
-
-    - name: Allow HTTPS
-      ufw:
-        rule: allow
-        port: '443'
-        proto: tcp
+      loop:
+        - '22'
+        - '80'
+        - '443'
 
     - name: Enable UFW
       ufw:
         state: enabled
 
-    - name: Create web directory
+    - name: Ensure WordPress target directory exists
       file:
-        path: /var/www/html
+        path: /var/www/wordpress
         state: directory
         owner: www-data
         group: www-data
         mode: '0755'
 
-    - name: Create index page
-      copy:
-        content: "<h1>Server configured by Ansible!</h1>"
-        dest: /var/www/html/index.html
+    - name: Download latest WordPress
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/wordpress.tar.gz
 
-    - name: Print completion message
-      debug:
-        msg: "Server setup complete! Nginx, MySQL, PHP, Docker, UFW, Fail2ban all configured."
+    - name: Extract WordPress archive
+      unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /var/www/
+        remote_src: yes
+        owner: www-data
+        group: www-data
+
+    - name: Deploy WordPress Nginx Configuration Template
+      copy:
+        dest: /etc/nginx/sites-available/default
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              root /var/www/wordpress;
+              index index.php index.html index.htm;
+              server_name _;
+
+              location / {
+                  try_files $uri $uri/ /index.php?$args;
+              }
+
+              location ~ \.php$ {
+                  include snippets/fastcgi-php.conf;
+                  fastcgi_pass unix:/var/run/php/php-fpm.sock;
+              }
+
+              location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg)$ {
+                  expires max;
+                  log_not_found off;
+              }
+          }
+      notify: Reload Nginx
+
+    - name: Remove any interfering default links if present
+      file:
+        path: /etc/nginx/sites-enabled/app.local
+        state: absent
+      notify: Reload Nginx
+
+  handlers:
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
